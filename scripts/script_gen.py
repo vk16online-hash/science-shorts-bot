@@ -1,7 +1,8 @@
 """
-script_gen.py — topic → structured Short with per-scene b-roll queries.
+script_gen.py — topic + research -> structured Short script with scenes.
 
-Output shape:
+Input:  topic (str), research (dict from research.py)
+Output:
 {
   "title":      "...",
   "hashtags":   [...],
@@ -9,7 +10,9 @@ Output shape:
   "hook":       "...",
   "cta":        "...",
   "scenes": [
-     {"text": "narration", "broll_query": "3-5 word search", "keyword": "ONE WORD"},
+     {"text": "...",
+      "broll_queries": ["specific 1", "specific 2", "broad 3"],
+      "keyword": "ONE WORD"},
      ...
   ]
 }
@@ -26,36 +29,52 @@ load_dotenv()
 
 SYSTEM = (
     "You are a veteran science communicator writing YouTube Shorts. "
-    "You split scripts into 4–6 SCENES, each matched to one strong visual. "
-    "Respond with a single valid JSON object, nothing else."
+    "You split scripts into 4-6 SCENES, each with a specific visual. "
+    "Respond with ONE valid JSON object, nothing else."
 )
 
 PROMPT = """Topic: {topic}
 
-Write a ~45-second YouTube Short, split into 4–6 SCENES.
+RESEARCH CONTEXT (authoritative facts — use only these for accuracy):
 
-Rules:
-- Total narration: 90–130 words across all scenes
-- Scene 1 must be a killer hook (<=14 words)
-- Each scene: 15–30 words of narration
-- Every scene must have a DIFFERENT b-roll visual
-- Give a single ONE-WORD keyword per scene for a text pop-up
-- broll_query: 3–5 words, concrete and filmable (what you'd type into a stock site)
+SUMMARY:
+{summary}
+
+KEY FACTS:
+{facts}
+
+TECHNICAL TERMS (use sparingly, explain any you use):
+{terms}
+
+Write a ~45-second YouTube Short, split into 4-6 SCENES.
+
+RULES:
+- Total narration: 95-135 words
+- Scene 1 is a killer hook (<=14 words, startling fact or question)
+- Each scene: 18-32 words of narration
+- Every scene describes ONE concrete visual moment
+- Every scene must have a DIFFERENT visual (no repeats)
+- keyword: ONE WORD in CAPS that captures the scene's punch
+- broll_queries: a LADDER of 3 visual search phrases for this scene:
+    1. SPECIFIC  (ex: "liquid metal droplets macro slow motion")
+    2. ADJACENT  (ex: "silver liquid flowing close up")
+    3. BROAD     (ex: "metal surface texture")
+  Prefer queries that would find real footage on Wikipedia/arXiv/Pexels
 - Last scene ends with a short CTA
 
-Return EXACTLY this JSON shape:
+RETURN EXACTLY THIS JSON (no markdown, no commentary):
 
 {{
   "title":       "<YouTube title <=60 chars, ends with #Shorts>",
-  "hashtags":    ["#science", "#tech", "#engineering", "#<topic>", "#shorts"],
-  "description": "<2 sentences>",
-  "hook":        "<the hook sentence on its own>",
-  "cta":         "<the CTA sentence on its own>",
+  "hashtags":    ["#science", "#tech", "#engineering", "#<topic-specific>", "#shorts"],
+  "description": "<2 sentences, factual, no fluff>",
+  "hook":        "<hook sentence alone>",
+  "cta":         "<CTA sentence alone>",
   "scenes": [
     {{
-      "text":        "<narration for this scene>",
-      "broll_query": "<3–5 word visual search>",
-      "keyword":     "<ONE WORD pop-up>"
+      "text":          "<narration>",
+      "broll_queries": ["<specific>", "<adjacent>", "<broad>"],
+      "keyword":       "CAPS"
     }}
   ]
 }}"""
@@ -79,7 +98,7 @@ def _call_gemini(prompt: str) -> str:
         return model.generate_content(prompt).text
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(_do).result(timeout=45)
+        return pool.submit(_do).result(timeout=50)
 
 
 def _call_groq(prompt: str) -> str:
@@ -124,45 +143,62 @@ def _validate(data: dict) -> None:
     required = {"title", "hashtags", "description", "scenes"}
     missing = required - data.keys()
     if missing:
-        raise ValueError(f"missing keys: {missing}")
+        raise ValueError(f"missing top-level keys: {missing}")
     scenes = data["scenes"]
     if not isinstance(scenes, list) or not (3 <= len(scenes) <= 8):
         raise ValueError(f"scenes must be 3-8 items, got {len(scenes)}")
     for s in scenes:
-        if not all(k in s for k in ("text", "broll_query", "keyword")):
-            raise ValueError(f"scene missing keys: {s}")
+        if "text" not in s or "broll_queries" not in s:
+            raise ValueError(f"scene missing text/broll_queries: {s}")
+        if not isinstance(s["broll_queries"], list) or not s["broll_queries"]:
+            # heal by deriving from text
+            s["broll_queries"] = [s["text"][:40]]
+        if "keyword" not in s:
+            s["keyword"] = ""
     total = " ".join(s["text"] for s in scenes)
     wc = len(total.split())
-    if not (70 <= wc <= 180):
+    if not (70 <= wc <= 190):
         raise ValueError(f"script length {wc} words out of range")
 
 
-def _fallback(topic: str) -> dict:
+def _fallback(topic: str, research: dict) -> dict:
+    facts = research.get("key_facts", [])[:4] or [f"Fact about {topic}."]
+    scenes = []
+    for i, fact in enumerate(facts):
+        scenes.append({
+            "text": fact[:160],
+            "broll_queries": [topic, f"{topic} close up", "science laboratory"],
+            "keyword": f"FACT {i+1}",
+        })
+    scenes.append({
+        "text": "Follow for more science shorts.",
+        "broll_queries": ["space galaxy", "science abstract", "dark background"],
+        "keyword": "FOLLOW",
+    })
     return {
         "title": f"{topic[:50]} #Shorts",
         "hashtags": ["#science", "#tech", "#engineering", "#shorts"],
         "description": f"A 45-second breakdown of {topic}.",
-        "hook": f"Here's what nobody tells you about {topic}.",
-        "cta": "Follow for more.",
-        "scenes": [
-            {"text": f"Here's what nobody tells you about {topic}.",
-             "broll_query": f"{topic} closeup",
-             "keyword": "WAIT"},
-            {"text": "The core idea is subtle but once you see it, you can't unsee it.",
-             "broll_query": "science laboratory research",
-             "keyword": "SCIENCE"},
-            {"text": "Engineers spent decades refining this.",
-             "broll_query": "engineering machinery working",
-             "keyword": "DECADES"},
-            {"text": "Follow for more science shorts.",
-             "broll_query": "space galaxy nebula",
-             "keyword": "FOLLOW"},
-        ],
+        "hook": scenes[0]["text"],
+        "cta": "Follow for more science shorts.",
+        "scenes": scenes,
     }
 
 
-def generate_script(topic: str, attempts: int = 2) -> dict:
-    prompt = PROMPT.format(topic=topic)
+def generate_script(topic: str, research: dict | None = None, attempts: int = 2) -> dict:
+    research = research or {}
+    summary = (research.get("summary") or "")[:1500]
+    facts = research.get("key_facts", [])[:8]
+    facts_str = "\n".join(f"- {f}" for f in facts) or "(none extracted)"
+    terms = ", ".join(research.get("terms", [])[:10]) or "(none)"
+
+    prompt = PROMPT.format(
+        topic=topic,
+        summary=summary,
+        facts=facts_str,
+        terms=terms,
+    )
+
     callers = [
         (_call_gemini, "gemini"),
         (_call_groq, "groq"),
@@ -181,15 +217,19 @@ def generate_script(topic: str, attempts: int = 2) -> dict:
                 print(f"[script_gen] {name} failed: {e}", file=sys.stderr)
 
     print("[script_gen] all LLMs failed — using template fallback", file=sys.stderr)
-    return _fallback(topic)
+    return _fallback(topic, research)
 
 
 def narration_text(script: dict) -> str:
-    """Full narration as one string for TTS."""
     return " ".join(s["text"] for s in script["scenes"])
 
 
 if __name__ == "__main__":
-    topic = sys.argv[1] if len(sys.argv) > 1 else "How aerogel works"
-    result = generate_script(topic)
+    import sys as _sys
+    _sys.path.insert(0, "scripts")
+    from research import research_topic
+    topic = " ".join(_sys.argv[1:]) or "Large Hadron Collider"
+    print(f"[script_gen] researching: {topic}", file=sys.stderr)
+    research = research_topic(topic)
+    result = generate_script(topic, research)
     print(json.dumps(result, indent=2, ensure_ascii=False))

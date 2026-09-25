@@ -1,17 +1,18 @@
 """
 render.py — pro-grade YouTube Short assembly.
 
-Features:
-  - Ken Burns motion on every clip (varying zoom/pan per scene)
-  - xfade transitions between scenes (varied: fade/slide/wipe)
-  - Cinematic color grading (film contrast curve)
-  - Subtle vignette
-  - Burns ASS captions on top
-  - Mixed audio: narration + optional bed
+Handles BOTH images and videos:
+  - images: Ken Burns zoom/pan for motion
+  - videos: Ken Burns + trim
+  - varied xfade transitions (randomized per run)
+  - cinematic color grade + vignette
+  - burned ASS captions + voiceover
 
 Usage:
   python scripts/render.py <audio.mp3> <captions.ass> <out.mp4> <scene_start> <scene_end> <clip> [...]
+  (scene times alternate: start end start end ...)
 """
+import random
 import subprocess
 import sys
 import tempfile
@@ -22,16 +23,30 @@ W, H = 1080, 1920
 FPS = 30
 XFADE_DUR = 0.4
 
-# Ken Burns variants — cycled by scene index for visual variety
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+
+# Ken Burns variants — cycled by scene index
 KB_EFFECTS = [
-    "zoompan=z='min(zoom+0.0008,1.12)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps={FPS}",
-    "zoompan=z='if(eq(on,1),1.12,max(zoom-0.0008,1.0))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps={FPS}",
-    "zoompan=z='min(zoom+0.0006,1.10)':x='0':y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps={FPS}",
-    "zoompan=z='min(zoom+0.0006,1.10)':x='iw-(iw/zoom)':y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps={FPS}",
+    "zoompan=z='min(zoom+0.0008,1.15)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps={FPS}",
+    "zoompan=z='if(eq(on,1),1.15,max(zoom-0.0008,1.0))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps={FPS}",
+    "zoompan=z='min(zoom+0.0006,1.12)':x='0':y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps={FPS}",
+    "zoompan=z='min(zoom+0.0006,1.12)':x='iw-(iw/zoom)':y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps={FPS}",
+    "zoompan=z='min(zoom+0.0006,1.12)':x='iw/2-(iw/zoom/2)':y='0':d=1:s={W}x{H}:fps={FPS}",
+    "zoompan=z='min(zoom+0.0006,1.12)':x='iw/2-(iw/zoom/2)':y='ih-(ih/zoom)':d=1:s={W}x{H}:fps={FPS}",
 ]
 
-# xfade transitions — cycled by scene index
-XFADE_TRANSITIONS = ["fade", "slideleft", "wipeleft", "fadeblack", "smoothleft"]
+# Transition pool — shuffled per run for variety
+XFADE_POOL = [
+    "fade", "fadeblack", "fadewhite",
+    "slideleft", "slideright", "slideup", "slidedown",
+    "wipeleft", "wiperight", "wipeup", "wipedown",
+    "smoothleft", "smoothright",
+    "circleopen", "circleclose",
+    "radial",
+    "pixelize",
+    "dissolve",
+    "squeezev", "squeezeh",
+]
 
 
 def _run(cmd, cwd=None):
@@ -62,8 +77,12 @@ def _rel(p) -> str:
         return abs_p.as_posix()
 
 
+def _is_image(path) -> bool:
+    return Path(str(path)).suffix.lower() in IMAGE_EXTS
+
+
 def _prep_clip(src, dst, duration: float, kb_idx: int):
-    """Trim/loop source to duration and apply Ken Burns + color grade + vignette."""
+    """Trim/loop source to duration, apply Ken Burns + color grade + vignette."""
     kb = KB_EFFECTS[kb_idx % len(KB_EFFECTS)].format(W=W, H=H, FPS=FPS)
     vf = (
         f"scale={W * 2}:{H * 2}:force_original_aspect_ratio=increase,"
@@ -74,9 +93,16 @@ def _prep_clip(src, dst, duration: float, kb_idx: int):
         f"vignette=PI/5,"
         f"format=yuv420p"
     )
+
+    # Image inputs need -loop 1; video inputs use -stream_loop -1
+    if _is_image(src):
+        pre_input = ["-loop", "1"]
+    else:
+        pre_input = ["-stream_loop", "-1"]
+
     _run([
         "ffmpeg", "-y",
-        "-stream_loop", "-1",
+        *pre_input,
         "-i", str(src),
         "-t", f"{duration:.3f}",
         "-vf", vf,
@@ -97,54 +123,61 @@ def render(scenes, audio, ass, out_path="output/final.mp4"):
     out.parent.mkdir(parents=True, exist_ok=True)
 
     audio_dur = probe_duration(audio)
-    print(f"[render] voiceover: {audio_dur:.2f}s across {len(scenes)} scenes",
+    n = len(scenes)
+    print(f"[render] voiceover: {audio_dur:.2f}s across {n} scenes",
           file=sys.stderr)
 
-    # Compute each scene's display duration. Overlap by XFADE_DUR for the transition.
+    # Compute each scene's display duration
     segs = []
     for i, s in enumerate(scenes):
         start = float(s["start"])
         end = float(s["end"])
-        dur = max(1.0, end - start)
-        if i < len(scenes) - 1:
-            dur += XFADE_DUR   # extra for the crossfade into next
-        segs.append({**s, "dur": dur})
+        dur = max(1.5, end - start)
+        if i < n - 1:
+            dur += XFADE_DUR
+        segs.append({**s, "dur": dur, "is_image": _is_image(s["clip"])})
 
-    # Last scene extends to audio end if needed
-    total_visible = sum(s["dur"] for s in segs) - XFADE_DUR * (len(segs) - 1)
+    # Extend last scene if needed
+    total_visible = sum(s["dur"] for s in segs) - XFADE_DUR * (n - 1)
     if total_visible < audio_dur:
         segs[-1]["dur"] += (audio_dur - total_visible)
+
+    # Pick random transitions for this run
+    transitions = random.sample(XFADE_POOL, min(n - 1, len(XFADE_POOL)))
+    while len(transitions) < n - 1:
+        transitions.append(random.choice(XFADE_POOL))
+    print(f"[render] transitions: {transitions}", file=sys.stderr)
 
     with tempfile.TemporaryDirectory(prefix="shorts_render_") as td:
         workdir = Path(td)
 
-        # 1. Prepare each clip with motion + grade
+        # 1. Prepare each clip
         prepared = []
         for i, s in enumerate(segs):
             dst = workdir / f"prep_{i}.mp4"
-            print(f"[render] prep {i + 1}/{len(segs)} ({s['dur']:.2f}s): "
+            kind = "img" if s["is_image"] else "vid"
+            print(f"[render] prep {i + 1}/{n} ({s['dur']:.2f}s, {kind}): "
                   f"{Path(s['clip']).name}", file=sys.stderr)
             _prep_clip(s["clip"], dst, s["dur"], kb_idx=i)
             prepared.append(dst)
 
-        # 2. Build filter_complex with xfade chain
-        if len(prepared) == 1:
-            # single-clip case — no xfade
+        # 2. Build filter_complex
+        if n == 1:
             inputs = ["-i", str(prepared[0])]
             fc = (
                 f"[0:v]trim=duration={audio_dur:.3f},setpts=PTS-STARTPTS,"
                 f"ass={_rel(ass)}[vout]"
             )
-            vout_label = "[vout]"
+            vout = "[vout]"
         else:
             inputs = []
             for p in prepared:
                 inputs += ["-i", str(p)]
 
             parts = []
-            # First chain: xfade 0↔1
+            # First pair
             offset = segs[0]["dur"] - XFADE_DUR
-            trans = XFADE_TRANSITIONS[0 % len(XFADE_TRANSITIONS)]
+            trans = transitions[0]
             parts.append(
                 f"[0:v][1:v]xfade=transition={trans}:duration={XFADE_DUR}:"
                 f"offset={offset:.3f}[v01]"
@@ -152,9 +185,9 @@ def render(scenes, audio, ass, out_path="output/final.mp4"):
             last = "[v01]"
             cumulative = segs[0]["dur"] + segs[1]["dur"] - 2 * XFADE_DUR
 
-            for i in range(2, len(prepared)):
+            for i in range(2, n):
                 offset = cumulative
-                trans = XFADE_TRANSITIONS[i % len(XFADE_TRANSITIONS)]
+                trans = transitions[i - 1]
                 out_label = f"[v{i:02d}]"
                 parts.append(
                     f"{last}[{i}:v]xfade=transition={trans}:"
@@ -168,16 +201,16 @@ def render(scenes, audio, ass, out_path="output/final.mp4"):
                 f"ass={_rel(ass)}[vout]"
             )
             fc = ";".join(parts)
-            vout_label = "[vout]"
+            vout = "[vout]"
 
-        audio_input_idx = len(prepared)
+        audio_idx = n
         inputs += ["-i", str(audio)]
 
         cmd = (
             ["ffmpeg", "-y"] + inputs +
             ["-filter_complex", fc,
-             "-map", vout_label,
-             "-map", f"{audio_input_idx}:a",
+             "-map", vout,
+             "-map", f"{audio_idx}:a",
              "-t", f"{audio_dur:.3f}",
              "-c:v", "libx264", "-preset", "medium", "-crf", "18",
              "-pix_fmt", "yuv420p",
@@ -194,10 +227,12 @@ def render(scenes, audio, ass, out_path="output/final.mp4"):
 
 
 if __name__ == "__main__":
-    # Quick CLI test using equally-spaced scenes
-    if len(sys.argv) < 5:
-        print("usage: render.py <audio> <ass> <out> <clip1> <clip2> [...]",
-              file=sys.stderr)
+    if len(sys.argv) < 4:
+        print(
+            "usage: render.py <audio> <ass> <out> <clip1> <clip2> ...\n"
+            "(equal time per clip for testing)",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     audio = sys.argv[1]
