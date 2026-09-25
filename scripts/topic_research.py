@@ -39,7 +39,9 @@ def load_history() -> list:
         return json.loads(HISTORY_FILE.read_text())
     except json.JSONDecodeError:
         return []
-
+def save_history(history: list) -> None:
+    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    HISTORY_FILE.write_text(json.dumps(history, indent=2, ensure_ascii=False))
 
 def _build_prompt(covered: list) -> str:
     covered_str = json.dumps(covered[-40:], indent=0) if covered else "[]"

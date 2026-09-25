@@ -4,7 +4,7 @@ scene_align.py — aligns each scene's narration to its time range in the audio.
 Uses word timestamps from captions.transcribe_words() to find the
 start of the first word and the end of the last word of each scene.
 """
-from scripts.captions import transcribe_words
+from captions import transcribe_words
 
 
 def _normalize(text: str) -> str:
