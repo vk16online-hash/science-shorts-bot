@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+.venv/
+
+# Pipeline output (regenerated each run)
+output/
+assets/broll/
+assets/norm_*.mp4
+assets/concat.txt
+
+# Local-only files (never commit)
+client_secret.json
+get_token.py
+
+# OS noise
+.DS_Store
+Thumbs.db
+client_secret.json
+state/token.json
