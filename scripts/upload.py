@@ -16,10 +16,40 @@ from googleapiclient.http import MediaFileUpload
 CATEGORY_SCIENCE = "28"
 
 
+def _extract_json_blob(raw: str) -> dict:
+    """Extract the first {...} JSON object from arbitrary text."""
+    start = raw.find("{")
+    if start == -1:
+        raise ValueError("No JSON object found in credential string")
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(raw)):
+        ch = raw[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return json.loads(raw[start:i + 1])
+    raise ValueError("Unbalanced JSON braces in credential string")
+
+
 def _load_credentials() -> Credentials:
     raw = os.environ.get("YOUTUBE_TOKEN_JSON", "").strip()
     if raw:
-        info = json.loads(raw)
+        info = _extract_json_blob(raw)
     elif Path("state/token.json").exists():
         info = json.loads(Path("state/token.json").read_text())
     else:
