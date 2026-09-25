@@ -25,3 +25,7 @@ run.log
 *.log
 run.log
 *.log
+assets/scene_assets/
+assets/broll/
+assets/fonts/
+test_assets.json
